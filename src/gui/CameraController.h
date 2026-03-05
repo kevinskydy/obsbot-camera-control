@@ -92,6 +92,26 @@ public:
         bool completed = false;
     };
 
+    struct DeviceCapabilities {
+        bool aiModes = false;
+        bool aiStatus = false;
+        bool panTilt = false;
+        bool zoom = false;
+        bool hdrGet = false;
+        bool fov = false;
+        bool faceAE = false;
+        bool faceFocus = false;
+        bool imageControls = false;
+        bool whiteBalance = false;
+        bool autoZoom = false;
+        bool trackSpeed = false;
+        bool audioAutoGain = false;
+        bool antiFlicker = false;
+        bool autofocus = false;
+        bool videoDevice = false;
+        bool virtualCamera = false;
+    };
+
     explicit CameraController(QObject *parent = nullptr);
     ~CameraController();
 
@@ -155,6 +175,7 @@ public:
     ParamRange getWhiteBalanceKelvinRange() const { return m_whiteBalanceKelvinRange; }
     const std::vector<int>& getSupportedWhiteBalanceTypes() const { return m_supportedWhiteBalanceTypes; }
     const DiagnosticsReport& getDiagnosticsReport() const { return m_diagnosticsReport; }
+    const DeviceCapabilities& capabilities() const { return m_capabilities; }
 
 signals:
     void cameraConnected(const CameraInfo &info);
@@ -181,6 +202,7 @@ private:
     bool m_whiteBalanceFallbackActive;
     int m_fallbackWhiteBalanceMode;
     DiagnosticsReport m_diagnosticsReport;
+    DeviceCapabilities m_capabilities;
     bool isTiny2Family() const;
 
     // Helper
@@ -189,6 +211,8 @@ private:
     void updateState();
     void saveCurrentStateToConfig();  // Update config with current camera state
     void runDiagnostics();
+    void populateCapabilities();
+    void classifyFromDiagnostics();
     void saveDiagnosticsToFile();
     void refreshControlRanges();
     void resetControlRanges();

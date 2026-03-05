@@ -109,7 +109,7 @@ CameraController::CameraState CameraController::getCurrentState()
 
 bool CameraController::hasTiny2Capabilities() const
 {
-    return isTiny2Family();
+    return m_capabilities.aiModes;
 }
 
 bool CameraController::enableAutoFraming(bool enabled)
@@ -707,9 +707,92 @@ void CameraController::runDiagnostics()
     // === 11. Mirror/Flip ===
     probeInt("Mirror/Flip", "mirror_flip", &Device::cameraGetMirrorFlipR);
 
+    populateCapabilities();
+    classifyFromDiagnostics();
+
     m_diagnosticsReport.completed = true;
     saveDiagnosticsToFile();
     emit diagnosticsCompleted(m_diagnosticsReport);
+}
+
+void CameraController::populateCapabilities()
+{
+    m_capabilities = {};
+
+    auto ok = [this](const QString &category, const QString &name) -> bool {
+        auto it = m_diagnosticsReport.categories.find(category);
+        if (it == m_diagnosticsReport.categories.end()) return false;
+        for (const auto &probe : it.value()) {
+            if (probe.first == name) return probe.second.supported;
+        }
+        return false;
+    };
+
+    m_capabilities.aiModes = ok("AI Modes", "accepted_modes");
+    m_capabilities.aiStatus = ok("AI Modes", "ai_status");
+    m_capabilities.panTilt = ok("PTZ", "pan_tilt");
+    m_capabilities.zoom = ok("PTZ", "zoom_range");
+    m_capabilities.hdrGet = ok("HDR & FOV", "wdr_mode");
+    m_capabilities.fov = ok("HDR & FOV", "fov_current");
+    m_capabilities.faceAE = ok("Face AE & Focus", "face_ae");
+    m_capabilities.faceFocus = ok("Face AE & Focus", "face_focus_settable");
+    m_capabilities.imageControls = ok("Image Controls", "brightness_range");
+    m_capabilities.whiteBalance = ok("White Balance", "wb_current");
+    m_capabilities.autoZoom = m_capabilities.aiModes;
+    m_capabilities.trackSpeed = m_capabilities.aiModes;
+    m_capabilities.audioAutoGain = m_capabilities.aiModes;
+    m_capabilities.antiFlicker = ok("Exposure", "anti_flicker");
+    m_capabilities.autofocus = ok("Focus", "autofocus_mode");
+    m_capabilities.videoDevice = ok("Video Device", "video_device_path");
+    m_capabilities.virtualCamera = ok("Video Device", "virtual_camera_module");
+}
+
+void CameraController::classifyFromDiagnostics()
+{
+    auto addResult = [this](const QString &category, const QString &name, int32_t ret, const QString &details = {}) {
+        DiagnosticResult r;
+        r.supported = (ret == 0);
+        r.errorCode = ret;
+        r.details = details;
+        m_diagnosticsReport.categories[category].append({name, r});
+    };
+
+    // Map product type enum to display name
+    static const QMap<int, QString> productNames = {
+        {ObsbotProdTiny, "Tiny"}, {ObsbotProdTiny4k, "Tiny 4K"},
+        {ObsbotProdTiny2, "Tiny 2"}, {ObsbotProdTiny2Lite, "Tiny 2 Lite"},
+        {ObsbotProdTinySE, "Tiny SE"}, {ObsbotProdMeet, "Meet"},
+        {ObsbotProdMeet4k, "Meet 4K"}, {ObsbotProdMeet2, "Meet 2"},
+        {ObsbotProdMeetSE, "Meet SE"}, {ObsbotProdTailAir, "Tail Air"},
+        {ObsbotProdTail2, "Tail 2"}, {ObsbotProdTail2S, "Tail 2S"},
+        {ObsbotProdMe, "Me"}, {ObsbotProdHDMIBox, "HDMI Box"},
+        {ObsbotProdNDIBox, "NDI Box"},
+    };
+    QString sdkName = productNames.value(m_diagnosticsReport.productType, "Unknown");
+
+    // Infer family from diagnostic probe results
+    QString inferredFamily;
+    if (m_capabilities.aiModes) {
+        inferredFamily = "Tiny 2 Series";
+    } else if (m_capabilities.panTilt && !m_capabilities.aiStatus) {
+        inferredFamily = "Meet Series";
+    } else if (m_capabilities.hdrGet && m_capabilities.aiStatus) {
+        inferredFamily = "Tail Air";
+    } else if (m_capabilities.aiStatus && m_capabilities.zoom) {
+        inferredFamily = "Tiny / Tiny 4K";
+    } else {
+        inferredFamily = "Unknown";
+    }
+
+    addResult("  Classification", "sdk_product_type", 0,
+              QString("%1 (enum %2)").arg(sdkName).arg(m_diagnosticsReport.productType));
+    addResult("  Classification", "inferred_family", 0, inferredFamily);
+
+    bool match = inferredFamily == "Unknown"
+        || sdkName.contains(inferredFamily.split(" ").first(), Qt::CaseInsensitive)
+        || inferredFamily.contains(sdkName.split(" ").first(), Qt::CaseInsensitive);
+    addResult("  Classification", "match", match ? 0 : -1,
+              match ? "SDK type matches diagnostics" : "MISMATCH - diagnostics suggest " + inferredFamily);
 }
 
 void CameraController::saveDiagnosticsToFile()
@@ -855,7 +938,7 @@ void CameraController::applyConfigToCamera()
     setZoom(settings.zoom);
     setPanTilt(settings.pan, settings.tilt);
 
-    if (isTiny2Family()) {
+    if (m_capabilities.aiModes) {
         setAiMode(settings.aiMode, settings.aiSubMode);
         setAutoZoom(settings.autoZoom);
         setTrackSpeed(settings.trackSpeed);
@@ -892,7 +975,7 @@ void CameraController::applyCurrentStateToCamera(const CameraState &uiState)
 
     // Apply the current UI state to camera (respects user changes)
     enableAutoFraming(uiState.autoFramingEnabled);
-    if (isTiny2Family()) {
+    if (m_capabilities.aiModes) {
         setAiMode(uiState.aiMode, uiState.aiSubMode);
         setAutoZoom(uiState.autoZoomEnabled);
         setTrackSpeed(uiState.trackSpeedMode);
