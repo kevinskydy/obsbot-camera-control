@@ -1,5 +1,9 @@
 #include "CameraController.h"
 #include <QThread>
+#include <QDir>
+#include <QFile>
+#include <QTextStream>
+#include <QStandardPaths>
 #include <algorithm>
 
 CameraController::CameraController(QObject *parent)
@@ -31,21 +35,11 @@ void CameraController::connectToCamera()
     // Setup device detection callback
     auto onDevChanged = [this](std::string dev_sn, bool connected, void *param) {
         if (connected) {
-            // Device connected
             auto dev_list = Devices::get().getDevList();
             if (!dev_list.empty()) {
                 m_device = dev_list.front();
                 m_connected = true;
-
-                m_cameraInfo.name = QString::fromStdString(m_device->devName());
-                m_cameraInfo.serialNumber = QString::fromStdString(m_device->devSn());
-                m_cameraInfo.version = QString::fromStdString(m_device->devVersion());
-                m_cameraInfo.productType = m_device->productType();
-                m_cameraInfo.connected = true;
-
-                refreshControlRanges();
-                emit cameraConnected(m_cameraInfo);
-                updateState();
+                handleDeviceConnected();
             }
         } else {
             m_connected = false;
@@ -65,17 +59,22 @@ void CameraController::connectToCamera()
     if (!dev_list.empty() && !m_connected) {
         m_device = dev_list.front();
         m_connected = true;
+        handleDeviceConnected();
+    }
+}
 
-        m_cameraInfo.name = QString::fromStdString(m_device->devName());
-        m_cameraInfo.serialNumber = QString::fromStdString(m_device->devSn());
+void CameraController::handleDeviceConnected()
+{
+    m_cameraInfo.name = QString::fromStdString(m_device->devName());
+    m_cameraInfo.serialNumber = QString::fromStdString(m_device->devSn());
     m_cameraInfo.version = QString::fromStdString(m_device->devVersion());
     m_cameraInfo.productType = m_device->productType();
     m_cameraInfo.connected = true;
 
+    runDiagnostics();
     refreshControlRanges();
     emit cameraConnected(m_cameraInfo);
     updateState();
-    }
 }
 
 void CameraController::disconnectFromCamera()
@@ -478,6 +477,276 @@ bool CameraController::executeCommand(const QString &description, std::function<
         return false;
     }
     return true;
+}
+
+void CameraController::runDiagnostics()
+{
+    if (!m_device) return;
+
+    m_diagnosticsReport = {};
+    m_diagnosticsReport.cameraName = m_cameraInfo.name;
+    m_diagnosticsReport.serialNumber = m_cameraInfo.serialNumber;
+    m_diagnosticsReport.productType = m_cameraInfo.productType;
+    m_diagnosticsReport.timestamp = QDateTime::currentDateTime();
+
+    auto addResult = [this](const QString &category, const QString &name, int32_t ret, const QString &details = {}) {
+        DiagnosticResult r;
+        r.supported = (ret == 0);
+        r.errorCode = ret;
+        r.details = details;
+        m_diagnosticsReport.categories[category].append({name, r});
+    };
+
+    // Helper for UvcParamRange probes
+    auto probeRange = [&](const QString &category, const QString &name,
+                          int32_t (Device::*getter)(Device::UvcParamRange &)) {
+        Device::UvcParamRange range{};
+        int32_t ret = (m_device.get()->*getter)(range);
+        QString details;
+        if (ret == 0) {
+            details = QString("min=%1 max=%2 step=%3 default=%4")
+                .arg(range.min_).arg(range.max_).arg(range.step_).arg(range.default_);
+        }
+        addResult(category, name, ret, details);
+    };
+
+    // Helper for int32_t value probes
+    auto probeInt = [&](const QString &category, const QString &name,
+                        int32_t (Device::*getter)(int32_t &)) {
+        int32_t val = 0;
+        int32_t ret = (m_device.get()->*getter)(val);
+        addResult(category, name, ret, ret == 0 ? QString::number(val) : QString());
+    };
+
+    // Helper for float value probes
+    auto probeFloat = [&](const QString &category, const QString &name,
+                          int32_t (Device::*getter)(float &)) {
+        float val = 0;
+        int32_t ret = (m_device.get()->*getter)(val);
+        addResult(category, name, ret, ret == 0 ? QString::number(val, 'f', 2) : QString());
+    };
+
+    // === 1. Camera Status (foundation for all other checks) ===
+    Device::CameraStatus camStatus{};
+    bool hasStatus = false;
+    {
+        int32_t ret = m_device->cameraGetCameraStatusU(camStatus);
+        hasStatus = (ret == 0);
+        QString details;
+        if (hasStatus) {
+            const char *statusNames[] = {"Run", "Sleep", "Privacy"};
+            int devSt = camStatus.tiny.dev_status;
+            details = QString("device_status=%1 ai_mode=%2 fov=%3 hdr=%4")
+                .arg(devSt >= 0 && devSt <= 2 ? statusNames[devSt] : QString::number(devSt))
+                .arg(camStatus.tiny.ai_mode)
+                .arg(camStatus.tiny.fov)
+                .arg(camStatus.tiny.hdr);
+        }
+        addResult("Camera Status", "camera_status", ret, details);
+    }
+
+    // === 2. Video Device & Preview ===
+    {
+        QString devPath = QString::fromStdString(m_device->videoDevPath());
+        bool pathValid = !devPath.isEmpty();
+        addResult("Video Device", "video_device_path", pathValid ? 0 : -1,
+                  pathValid ? devPath : QString());
+
+        if (pathValid) {
+            bool deviceExists = QFile::exists(devPath);
+            addResult("Video Device", "preview_capable", deviceExists ? 0 : -1,
+                      deviceExists ? "device node exists" : "device node missing");
+        }
+
+        // v4l2loopback module check for virtual camera
+        bool v4l2loopbackLoaded = QFile::exists("/sys/module/v4l2loopback");
+        addResult("Video Device", "virtual_camera_module", v4l2loopbackLoaded ? 0 : -1,
+                  v4l2loopbackLoaded ? "v4l2loopback loaded" : "v4l2loopback not loaded");
+    }
+
+    // === 3. PTZ (Pan/Tilt/Zoom) ===
+    probeRange("PTZ", "zoom_range", &Device::cameraGetRangeZoomAbsoluteR);
+    probeFloat("PTZ", "zoom_current", &Device::cameraGetZoomAbsoluteR);
+    {
+        // Test pan/tilt by commanding center position (0,0) — harmless no-op
+        int32_t ret = m_device->cameraSetPanTiltAbsolute(0.0, 0.0);
+        addResult("PTZ", "pan_tilt", ret, ret == 0 ? "responsive" : QString());
+    }
+
+    // === 4. AI Modes ===
+    {
+        Device::AiStatus aiStatus{};
+        int32_t ret = m_device->aiGetAiStatusR(&aiStatus);
+        addResult("AI Modes", "ai_status", ret, ret == 0 ? "OK" : QString());
+    }
+    {
+        // Probe which AI work modes are accepted by setting each, then restoring original
+        int originalMode = hasStatus ? camStatus.tiny.ai_mode : 0;
+        int originalSubMode = hasStatus ? camStatus.tiny.ai_sub_mode : 0;
+
+        struct { Device::AiWorkModeType mode; const char *name; } aiModes[] = {
+            {Device::AiWorkModeNone, "None"},
+            {Device::AiWorkModeGroup, "Group"},
+            {Device::AiWorkModeHuman, "Human"},
+            {Device::AiWorkModeHand, "Hand"},
+            {Device::AiWorkModeWhiteBoard, "WhiteBoard"},
+            {Device::AiWorkModeDesk, "Desk"},
+        };
+
+        QStringList accepted, rejected;
+        for (const auto &m : aiModes) {
+            int32_t ret = m_device->cameraSetAiModeU(m.mode, 0);
+            if (ret == 0) {
+                accepted << m.name;
+            } else {
+                rejected << m.name;
+            }
+        }
+
+        // Restore original mode
+        m_device->cameraSetAiModeU(static_cast<Device::AiWorkModeType>(originalMode), originalSubMode);
+
+        addResult("AI Modes", "accepted_modes", accepted.isEmpty() ? -1 : 0,
+                  QString("accepted=[%1]").arg(accepted.join(", ")));
+        if (!rejected.isEmpty()) {
+            addResult("AI Modes", "rejected_modes", -1,
+                      QString("rejected=[%1]").arg(rejected.join(", ")));
+        }
+    }
+
+    // === 5. HDR & FOV ===
+    probeInt("HDR & FOV", "wdr_mode", &Device::cameraGetWdrR);
+    {
+        std::vector<int32_t> wdrList;
+        int32_t ret = m_device->cameraGetWdrListR(wdrList);
+        QString details;
+        if (ret == 0) {
+            QStringList modes;
+            for (auto m : wdrList) modes << QString::number(m);
+            details = QString("modes=[%1]").arg(modes.join(", "));
+        }
+        addResult("HDR & FOV", "wdr_list", ret, details);
+    }
+    if (hasStatus) {
+        const char *fovNames[] = {"86 (wide)", "78 (medium)", "65 (narrow)"};
+        int fov = camStatus.tiny.fov;
+        addResult("HDR & FOV", "fov_current", 0,
+                  fov >= 0 && fov <= 2 ? fovNames[fov] : QString::number(fov));
+    }
+
+    // === 6. Face AE & Face Focus ===
+    {
+        bool enabled = false;
+        int32_t ret = m_device->cameraGetFaceAER(enabled);
+        addResult("Face AE & Focus", "face_ae", ret,
+                  ret == 0 ? (enabled ? "enabled" : "disabled") : QString());
+    }
+    if (hasStatus) {
+        addResult("Face AE & Focus", "face_auto_focus", 0,
+                  camStatus.tiny.face_auto_focus ? "enabled" : "disabled");
+    }
+    {
+        // Probe face focus setter (set to current value, effectively a no-op)
+        bool currentFaceFocus = hasStatus ? camStatus.tiny.face_auto_focus : false;
+        int32_t ret = m_device->cameraSetFaceFocusR(currentFaceFocus);
+        addResult("Face AE & Focus", "face_focus_settable", ret,
+                  ret == 0 ? "responsive" : QString());
+    }
+
+    // === 7. Image Controls ===
+    probeRange("Image Controls", "brightness_range", &Device::cameraGetRangeImageBrightnessR);
+    probeInt("Image Controls", "brightness", &Device::cameraGetImageBrightnessR);
+    probeRange("Image Controls", "contrast_range", &Device::cameraGetRangeImageContrastR);
+    probeInt("Image Controls", "contrast", &Device::cameraGetImageContrastR);
+    probeRange("Image Controls", "saturation_range", &Device::cameraGetRangeImageSaturationR);
+    probeInt("Image Controls", "saturation", &Device::cameraGetImageSaturationR);
+    probeRange("Image Controls", "sharpness_range", &Device::cameraGetRangeImageSharpR);
+    probeInt("Image Controls", "sharpness", &Device::cameraGetImageSharpR);
+    probeRange("Image Controls", "hue_range", &Device::cameraGetRangeImageHueR);
+    probeInt("Image Controls", "hue", &Device::cameraGetImageHueR);
+
+    // === 8. White Balance ===
+    {
+        Device::DevWhiteBalanceType wbType;
+        int32_t wbParam = 0;
+        int32_t ret = m_device->cameraGetWhiteBalanceR(wbType, wbParam);
+        QString details;
+        if (ret == 0) {
+            details = QString("type=%1 param=%2").arg(static_cast<int>(wbType)).arg(wbParam);
+        }
+        addResult("White Balance", "wb_current", ret, details);
+    }
+    {
+        std::vector<int32_t> wbList;
+        int32_t wbMin = 0, wbMax = 0;
+        int32_t ret = m_device->cameraGetWhiteBalanceListR(wbList, wbMin, wbMax);
+        QString details;
+        if (ret == 0) {
+            QStringList types;
+            for (auto t : wbList) types << QString::number(t);
+            details = QString("types=[%1] min=%2 max=%3").arg(types.join(", ")).arg(wbMin).arg(wbMax);
+        }
+        addResult("White Balance", "wb_list", ret, details);
+    }
+    probeRange("White Balance", "wb_kelvin_range", &Device::cameraGetRangeWhiteBalanceR);
+
+    // === 9. Exposure & Anti-Flicker ===
+    probeInt("Exposure", "exposure_mode", &Device::cameraGetExposureModeR);
+    probeInt("Exposure", "anti_flicker", &Device::cameraGetAntiFlickR);
+    probeRange("Exposure", "anti_flicker_range", &Device::cameraGetRangeAntiFlickR);
+
+    // === 10. Focus ===
+    {
+        Device::DevAutoFocusType focusType;
+        int32_t ret = m_device->cameraGetAutoFocusModeR(focusType);
+        addResult("Focus", "autofocus_mode", ret,
+                  ret == 0 ? QString::number(static_cast<int>(focusType)) : QString());
+    }
+    probeInt("Focus", "focus_position", &Device::cameraGetFocusPosR);
+
+    // === 11. Mirror/Flip ===
+    probeInt("Mirror/Flip", "mirror_flip", &Device::cameraGetMirrorFlipR);
+
+    m_diagnosticsReport.completed = true;
+    saveDiagnosticsToFile();
+    emit diagnosticsCompleted(m_diagnosticsReport);
+}
+
+void CameraController::saveDiagnosticsToFile()
+{
+    QString configDir = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation)
+        + "/obsbot-control";
+    QDir().mkpath(configDir);
+
+    QString filename = QString("%1/diagnostics-%2.txt")
+        .arg(configDir)
+        .arg(m_diagnosticsReport.serialNumber.isEmpty() ? "unknown" : m_diagnosticsReport.serialNumber);
+
+    QFile file(filename);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return;
+
+    QTextStream out(&file);
+    out << "Camera: " << m_diagnosticsReport.cameraName
+        << " (Product Type: " << m_diagnosticsReport.productType << ")\n";
+    out << "Serial: " << m_diagnosticsReport.serialNumber << "\n";
+    out << "Probed: " << m_diagnosticsReport.timestamp.toString("yyyy-MM-dd hh:mm:ss") << "\n\n";
+
+    for (auto it = m_diagnosticsReport.categories.constBegin();
+         it != m_diagnosticsReport.categories.constEnd(); ++it) {
+        out << "=== " << it.key() << " ===\n";
+        for (const auto &probe : it.value()) {
+            const auto &name = probe.first;
+            const auto &result = probe.second;
+            if (result.supported) {
+                out << "  [OK]   " << name;
+                if (!result.details.isEmpty()) out << ": " << result.details;
+                out << "\n";
+            } else {
+                out << "  [FAIL] " << name << ": error code " << result.errorCode << "\n";
+            }
+        }
+        out << "\n";
+    }
 }
 
 void CameraController::updateState()

@@ -177,6 +177,8 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onStateChanged);
     connect(m_controller, &CameraController::commandFailed,
             this, &MainWindow::onCommandFailed);
+    connect(m_controller, &CameraController::diagnosticsCompleted,
+            this, &MainWindow::onDiagnosticsCompleted);
 
     m_virtualCameraStreamer = new VirtualCameraStreamer(this);
     connect(m_virtualCameraStreamer, &VirtualCameraStreamer::errorOccurred,
@@ -399,6 +401,18 @@ void MainWindow::setupUI()
                 m_effectsWidget->applySettings(settings);
             });
     m_tabWidget->addTab(m_effectsWidget, tr("Creative FX"));
+
+    // Diagnostics tab
+    auto *diagnosticsWidget = new QWidget(this);
+    auto *diagnosticsLayout = new QVBoxLayout(diagnosticsWidget);
+    diagnosticsLayout->setContentsMargins(4, 4, 4, 4);
+    m_diagnosticsText = new QPlainTextEdit(this);
+    m_diagnosticsText->setReadOnly(true);
+    m_diagnosticsText->setPlaceholderText("Connect a camera to run diagnostics...");
+    m_diagnosticsText->setFont(QFont("monospace", 9));
+    diagnosticsLayout->addWidget(m_diagnosticsText);
+    m_tabWidget->addTab(diagnosticsWidget, tr("Diagnostics"));
+
     scrollLayout->addWidget(m_tabWidget);
     m_effectsWidget->reset();
 
@@ -1069,6 +1083,33 @@ void MainWindow::onCommandFailed(const QString &description, int errorCode)
 {
     QMessageBox::warning(this, "Command Failed",
         QString("%1 failed with error code: %2").arg(description).arg(errorCode));
+}
+
+void MainWindow::onDiagnosticsCompleted(const CameraController::DiagnosticsReport &report)
+{
+    QString text;
+    text += QString("Camera: %1 (Product Type: %2)\n")
+        .arg(report.cameraName).arg(report.productType);
+    text += QString("Serial: %1\n").arg(report.serialNumber);
+    text += QString("Probed: %1\n\n").arg(report.timestamp.toString("yyyy-MM-dd hh:mm:ss"));
+
+    for (auto it = report.categories.constBegin(); it != report.categories.constEnd(); ++it) {
+        text += QString("=== %1 ===\n").arg(it.key());
+        for (const auto &probe : it.value()) {
+            const auto &name = probe.first;
+            const auto &result = probe.second;
+            if (result.supported) {
+                text += QString("  [OK]   %1").arg(name);
+                if (!result.details.isEmpty()) text += QString(": %1").arg(result.details);
+                text += "\n";
+            } else {
+                text += QString("  [FAIL] %1: error code %2\n").arg(name).arg(result.errorCode);
+            }
+        }
+        text += "\n";
+    }
+
+    m_diagnosticsText->setPlainText(text);
 }
 
 void MainWindow::updateStatus()

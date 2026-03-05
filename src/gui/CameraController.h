@@ -3,6 +3,10 @@
 
 #include <QObject>
 #include <QTimer>
+#include <QDateTime>
+#include <QMap>
+#include <QVector>
+#include <QPair>
 #include <memory>
 #include <functional>
 #include <vector>
@@ -73,6 +77,21 @@ public:
         bool valid = false;
     };
 
+    struct DiagnosticResult {
+        bool supported;
+        int errorCode;
+        QString details;
+    };
+
+    struct DiagnosticsReport {
+        QMap<QString, QVector<QPair<QString, DiagnosticResult>>> categories;
+        QDateTime timestamp;
+        QString cameraName;
+        QString serialNumber;
+        int productType;
+        bool completed = false;
+    };
+
     explicit CameraController(QObject *parent = nullptr);
     ~CameraController();
 
@@ -135,6 +154,7 @@ public:
     ParamRange getSaturationRange() const { return m_saturationRange; }
     ParamRange getWhiteBalanceKelvinRange() const { return m_whiteBalanceKelvinRange; }
     const std::vector<int>& getSupportedWhiteBalanceTypes() const { return m_supportedWhiteBalanceTypes; }
+    const DiagnosticsReport& getDiagnosticsReport() const { return m_diagnosticsReport; }
 
 signals:
     void cameraConnected(const CameraInfo &info);
@@ -142,6 +162,7 @@ signals:
     void stateChanged(const CameraState &state);
     void commandFailed(const QString &description, int errorCode);
     void configLoaded();  // Emitted after config is successfully loaded
+    void diagnosticsCompleted(const DiagnosticsReport &report);
 
 private:
     std::shared_ptr<Device> m_device;
@@ -159,12 +180,16 @@ private:
     int m_lastRequestedWhiteBalance;
     bool m_whiteBalanceFallbackActive;
     int m_fallbackWhiteBalanceMode;
+    DiagnosticsReport m_diagnosticsReport;
     bool isTiny2Family() const;
 
     // Helper
     bool executeCommand(const QString &description, std::function<int32_t()> command);
+    void handleDeviceConnected();
     void updateState();
     void saveCurrentStateToConfig();  // Update config with current camera state
+    void runDiagnostics();
+    void saveDiagnosticsToFile();
     void refreshControlRanges();
     void resetControlRanges();
     int clampToRange(int value, const ParamRange &range, int fallbackMin, int fallbackMax) const;

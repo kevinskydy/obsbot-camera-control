@@ -9,6 +9,7 @@
 #include <QVBoxLayout>
 #include <QSystemTrayIcon>
 #include <QMenu>
+#include <QPlainTextEdit>
 #include "CameraController.h"
 #include "TrackingControlWidget.h"
 #include "PTZControlWidget.h"
@@ -64,6 +65,7 @@ private slots:
     void onVideoEffectsChanged(const FilterPreviewWidget::VideoEffectsSettings &settings);
     void onSnapshotCaptured(const QImage &image);
     void onSnapshotDirectoryEdited();
+    void onDiagnosticsCompleted(const CameraController::DiagnosticsReport &report);
 
 private:
     void setupUI();
@@ -118,6 +120,7 @@ private:
     CameraPreviewWidget *m_previewWidget;
     PreviewWindow *m_previewWindow;
     VirtualCameraStreamer *m_virtualCameraStreamer;
+    QPlainTextEdit *m_diagnosticsText;
 
     // Status timer
     QTimer *m_statusTimer;
