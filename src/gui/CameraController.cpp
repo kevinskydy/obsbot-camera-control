@@ -690,6 +690,24 @@ void CameraController::runDiagnostics()
     // === 11. Mirror/Flip ===
     probeInt("Mirror/Flip", "mirror_flip", &Device::cameraGetMirrorFlipR);
 
+    // === 12. Classification probes (quick read-only checks to identify device family) ===
+    {
+        Device::AiGimbalStateInfo gimInfo{};
+        int32_t ret = m_device->aiGetGimbalStateR(&gimInfo);
+        addResult("Gimbal", "gimbal_state", ret, ret == 0 ? "responsive" : QString());
+    }
+    {
+        Device::DevDataArray ids{};
+        int32_t ret = m_device->aiGetZonePresetListR(&ids);
+        addResult("Zone Tracking", "zone_preset_list", ret, ret == 0 ? "responsive" : QString());
+    }
+    {
+        Device::RtspOrNdiEnabled ndiRtsp;
+        int32_t ret = m_device->cameraGetSelectNdiOrRtspR(ndiRtsp);
+        addResult("Streaming", "ndi_rtsp_selection", ret,
+                  ret == 0 ? QString::number(static_cast<int>(ndiRtsp)) : QString());
+    }
+
     populateCapabilities();
     classifyFromDiagnostics();
 
@@ -713,7 +731,7 @@ void CameraController::populateCapabilities()
         return false;
     };
 
-    m_capabilities.aiModes = ok("AI Modes", "accepted_modes");
+    m_capabilities.aiModes = ok("Zone Tracking", "zone_preset_list");
     m_capabilities.aiStatus = ok("AI Modes", "ai_status");
     m_capabilities.panTilt = ok("PTZ", "pan_tilt");
     m_capabilities.zoom = ok("PTZ", "zoom_range");
@@ -765,12 +783,14 @@ void CameraController::classifyFromDiagnostics()
 
     // Infer family from diagnostic probe results
     QString inferredFamily;
-    if (m_capabilities.aiModes) {
+    if (m_capabilities.zoneTracking) {
         inferredFamily = "Tiny 2 Series";
+    } else if (m_capabilities.streaming) {
+        inferredFamily = "Tail Air";
+    } else if (m_capabilities.gimbal && m_capabilities.aiStatus) {
+        inferredFamily = "Tail Series";
     } else if (m_capabilities.panTilt && !m_capabilities.aiStatus) {
         inferredFamily = "Meet Series";
-    } else if (m_capabilities.hdrGet && m_capabilities.aiStatus) {
-        inferredFamily = "Tail Air";
     } else if (m_capabilities.aiStatus && m_capabilities.zoom) {
         inferredFamily = "Tiny / Tiny 4K";
     } else {
