@@ -41,6 +41,7 @@ public:
     ~MainWindow();
 
 private slots:
+    void onCameraDetected(const CameraController::CameraInfo &info);
     void onCameraConnected(const CameraController::CameraInfo &info);
     void onCameraDisconnected();
     void onStateChanged(const CameraController::CameraState &state);
@@ -66,8 +67,11 @@ private slots:
     void onSnapshotCaptured(const QImage &image);
     void onSnapshotDirectoryEdited();
     void onDiagnosticsCompleted(const CameraController::DiagnosticsReport &report);
+    void onExtendedDiagnosticsClicked();
+    void onExtendedDiagnosticsCompleted(bool success, int controlCount);
 
 private:
+    void setExtendedDiagnosticsUIEnabled(bool enabled);
     void setupUI();
     void setupTrayIcon();
     void loadConfiguration();
@@ -121,6 +125,7 @@ private:
     PreviewWindow *m_previewWindow;
     VirtualCameraStreamer *m_virtualCameraStreamer;
     QPlainTextEdit *m_diagnosticsText;
+    QPushButton *m_extendedDiagButton;
 
     // Status timer
     QTimer *m_statusTimer;

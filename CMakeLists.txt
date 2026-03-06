@@ -45,6 +45,8 @@ add_executable(obsbot-gui
     src/gui/PreviewWindow.h
     src/gui/XYPad.cpp
     src/gui/XYPad.h
+    src/gui/UvcProbe.cpp
+    src/gui/UvcProbe.h
     src/common/Config.cpp
     src/common/Config.h
     resources/resources.qrc

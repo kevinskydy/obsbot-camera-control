@@ -169,6 +169,8 @@ MainWindow::MainWindow(QWidget *parent)
     m_controller = new CameraController(this);
 
     // Connect signals
+    connect(m_controller, &CameraController::cameraDetected,
+            this, &MainWindow::onCameraDetected);
     connect(m_controller, &CameraController::cameraConnected,
             this, &MainWindow::onCameraConnected);
     connect(m_controller, &CameraController::cameraDisconnected,
@@ -411,6 +413,16 @@ void MainWindow::setupUI()
     m_diagnosticsText->setPlaceholderText("Connect a camera to run diagnostics...");
     m_diagnosticsText->setFont(QFont("monospace", 9));
     diagnosticsLayout->addWidget(m_diagnosticsText);
+    m_extendedDiagButton = new QPushButton(tr("Run Extended Diagnostics"), this);
+    m_extendedDiagButton->setToolTip(
+        tr("Run comprehensive diagnostics including extended SDK probes,\n"
+           "UVC extension unit enumeration, and vendor-specific control discovery.\n"
+           "This sends read-only queries and may take a moment to complete."));
+    m_extendedDiagButton->setEnabled(false);
+    diagnosticsLayout->addWidget(m_extendedDiagButton);
+    connect(m_extendedDiagButton, &QPushButton::clicked, this, &MainWindow::onExtendedDiagnosticsClicked);
+    connect(m_controller, &CameraController::extendedDiagnosticsCompleted,
+            this, &MainWindow::onExtendedDiagnosticsCompleted);
     m_tabWidget->addTab(diagnosticsWidget, tr("Diagnostics"));
 
     scrollLayout->addWidget(m_tabWidget);
@@ -1022,6 +1034,12 @@ void MainWindow::onPreviewWindowClosed()
     updatePreviewControls();
 }
 
+void MainWindow::onCameraDetected(const CameraController::CameraInfo &info)
+{
+    m_deviceInfoLabel->setText(QString("Probing...\n%1").arg(info.name));
+    updateStatusBanner(false);
+}
+
 void MainWindow::onCameraConnected(const CameraController::CameraInfo &info)
 {
     QString deviceText = QString("✓ Connected:\n%1\n(v%2)")
@@ -1032,6 +1050,9 @@ void MainWindow::onCameraConnected(const CameraController::CameraInfo &info)
     updateStatusBanner(true);
     m_cameraWarningLabel->setVisible(false);
     m_cameraWarningLabel->setText("");
+
+    m_extendedDiagButton->setEnabled(true);
+    m_extendedDiagButton->setText(tr("Run Extended Diagnostics"));
 
     // Apply current UI state to camera asynchronously (respects user changes before connection)
     // Use a short delay to let the connection stabilize
@@ -1060,6 +1081,10 @@ void MainWindow::onCameraDisconnected()
     m_statusLabel->setText("Status: Not connected");
     m_cameraWarningLabel->setVisible(false);
     m_cameraWarningLabel->setText("");
+    if (m_controller->isExtendedDiagnosticsRunning())
+        m_controller->cancelExtendedDiagnostics();
+    setExtendedDiagnosticsUIEnabled(true);
+    m_extendedDiagButton->setEnabled(false);
 
     attachPreviewToPanel();
     m_previewWindow->hide();
@@ -1110,6 +1135,43 @@ void MainWindow::onDiagnosticsCompleted(const CameraController::DiagnosticsRepor
     }
 
     m_diagnosticsText->setPlainText(text);
+}
+
+void MainWindow::onExtendedDiagnosticsClicked()
+{
+    if (m_controller->isExtendedDiagnosticsRunning()) {
+        // Stop was clicked
+        m_controller->cancelExtendedDiagnostics();
+        m_extendedDiagButton->setText(tr("Stopping..."));
+        m_extendedDiagButton->setEnabled(false);
+        return;
+    }
+
+    // Start extended diagnostics
+    m_extendedDiagButton->setText(tr("Stop Extended Diagnostics"));
+    setExtendedDiagnosticsUIEnabled(false);
+    m_controller->runExtendedDiagnostics();
+}
+
+void MainWindow::onExtendedDiagnosticsCompleted(bool success, int controlCount)
+{
+    setExtendedDiagnosticsUIEnabled(true);
+    m_extendedDiagButton->setEnabled(true);
+    m_extendedDiagButton->setText(success
+        ? tr("Re-run Extended Diagnostics (%1 UVC controls)").arg(controlCount)
+        : tr("Run Extended Diagnostics"));
+
+    // Refresh the diagnostics text to include extended results
+    onDiagnosticsCompleted(m_controller->getDiagnosticsReport());
+}
+
+void MainWindow::setExtendedDiagnosticsUIEnabled(bool enabled)
+{
+    m_trackingWidget->setEnabled(enabled);
+    m_ptzWidget->setEnabled(enabled);
+    m_settingsWidget->setEnabled(enabled);
+    m_effectsWidget->setEnabled(enabled);
+    m_reconnectButton->setEnabled(enabled);
 }
 
 void MainWindow::updateStatus()

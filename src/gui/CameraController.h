@@ -10,6 +10,7 @@
 #include <memory>
 #include <functional>
 #include <vector>
+#include <atomic>
 #include <dev/devs.hpp>
 #include "Config.h"
 
@@ -110,6 +111,13 @@ public:
         bool autofocus = false;
         bool videoDevice = false;
         bool virtualCamera = false;
+        bool gimbal = false;
+        bool gestureControl = false;
+        bool zoneTracking = false;
+        bool recording = false;
+        bool streaming = false;
+        bool aiControlParams = false;
+        bool uvcExtensionUnits = false;
     };
 
     explicit CameraController(QObject *parent = nullptr);
@@ -177,13 +185,20 @@ public:
     const DiagnosticsReport& getDiagnosticsReport() const { return m_diagnosticsReport; }
     const DeviceCapabilities& capabilities() const { return m_capabilities; }
 
+    // Extended diagnostics (opt-in, user-triggered, runs async)
+    void runExtendedDiagnostics();
+    void cancelExtendedDiagnostics();
+    bool isExtendedDiagnosticsRunning() const { return m_extendedDiagRunning.load(); }
+
 signals:
+    void cameraDetected(const CameraInfo &info);
     void cameraConnected(const CameraInfo &info);
     void cameraDisconnected();
     void stateChanged(const CameraState &state);
     void commandFailed(const QString &description, int errorCode);
     void configLoaded();  // Emitted after config is successfully loaded
     void diagnosticsCompleted(const DiagnosticsReport &report);
+    void extendedDiagnosticsCompleted(bool success, int controlCount);
 
 private:
     std::shared_ptr<Device> m_device;
@@ -203,6 +218,10 @@ private:
     int m_fallbackWhiteBalanceMode;
     DiagnosticsReport m_diagnosticsReport;
     DeviceCapabilities m_capabilities;
+    QString m_uvcProbeText;
+    std::atomic<bool> m_basicDiagRunning{false};
+    std::atomic<bool> m_extendedDiagRunning{false};
+    std::atomic<bool> m_extendedDiagCancelled{false};
     bool isTiny2Family() const;
 
     // Helper
@@ -213,6 +232,7 @@ private:
     void runDiagnostics();
     void populateCapabilities();
     void classifyFromDiagnostics();
+    void runExtendedDiagnosticsWorker();
     void saveDiagnosticsToFile();
     void refreshControlRanges();
     void resetControlRanges();
